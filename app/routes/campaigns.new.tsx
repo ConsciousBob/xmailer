@@ -1,144 +1,91 @@
-import { useState } from 'react'
 import { ActionFunctionArgs, LoaderFunctionArgs, json, redirect } from '@remix-run/node'
-import { Form, useActionData, useLoaderData, useNavigation } from '@remix-run/react'
+import { Form, useActionData, useLoaderData, useNavigation, Link } from '@remix-run/react'
 import { requireAuth } from '~/lib/auth.server'
 import { supabase } from '~/lib/supabase.server'
-import { emailQueue } from '~/lib/redis.server'
 import { Sidebar } from '~/components/layout/sidebar'
 import { Header } from '~/components/layout/header'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card'
-import { ArrowLeft, Send } from 'lucide-react'
-import { Link } from '@remix-run/react'
+import { Textarea } from '~/components/ui/textarea'
+import { ArrowLeft, Send, Save } from 'lucide-react'
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const user = await requireAuth(request)
   
-  // Get recipients and SMTP configs
-  const [recipientsResult, smtpConfigsResult, emailApisResult] = await Promise.all([
-    supabase.from('recipients').select('*').eq('user_id', user.id).eq('subscribed', true),
-    supabase.from('smtp_configs').select('*').eq('user_id', user.id).eq('is_active', true),
-    supabase.from('email_apis').select('*').eq('user_id', user.id).eq('is_active', true),
-  ])
+  // Get user's lists for targeting options
+  const { data: lists, error } = await supabase
+    .from('lists_with_counts')
+    .select('*')
+    .eq('user_id', user.id)
+    .eq('is_active', true)
+    .order('name')
 
-  return json({
-    user,
-    recipients: recipientsResult.data || [],
-    smtpConfigs: smtpConfigsResult.data || [],
-    emailApis: emailApisResult.data || [],
-  })
+  if (error) {
+    console.error('Lists fetch error:', error)
+    return json({ user, lists: [], error: 'Failed to load lists' })
+  }
+
+  return json({ user, lists })
 }
 
 export async function action({ request }: ActionFunctionArgs) {
   const user = await requireAuth(request)
   const formData = await request.formData()
-  
+  const action = formData.get('_action') as string
+
   const name = formData.get('name') as string
   const subject = formData.get('subject') as string
   const content = formData.get('content') as string
-  const sendMethod = formData.get('sendMethod') as string
-  const configId = formData.get('configId') as string
-  const action = formData.get('_action') as string
+  const targetAllSubscribers = formData.get('targetAllSubscribers') === 'true'
+  const includeLists = formData.getAll('includeLists') as string[]
+  const excludeLists = formData.getAll('excludeLists') as string[]
 
   if (!name || !subject || !content) {
-    return json({ error: 'All fields are required' }, { status: 400 })
+    return json({ error: 'Campaign name, subject, and content are required' }, { status: 400 })
   }
 
-  // Get recipients
-  const { data: recipients } = await supabase
-    .from('recipients')
-    .select('*')
-    .eq('user_id', user.id)
-    .eq('subscribed', true)
-
-  if (!recipients || recipients.length === 0) {
-    return json({ error: 'No recipients found' }, { status: 400 })
+  if (!targetAllSubscribers && includeLists.length === 0) {
+    return json({ error: 'Please select at least one list to target or enable "Target All Subscribers"' }, { status: 400 })
   }
 
-  // Create campaign
-  const { data: campaign, error: campaignError } = await supabase
+  const campaignData = {
+    user_id: user.id,
+    name,
+    subject,
+    content,
+    target_all_subscribers: targetAllSubscribers,
+    include_lists: includeLists.length > 0 ? includeLists : null,
+    exclude_lists: excludeLists.length > 0 ? excludeLists : null,
+    status: action === 'save' ? 'draft' : 'scheduled',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  }
+
+  const { data: campaign, error } = await supabase
     .from('campaigns')
-    .insert({
-      user_id: user.id,
-      name,
-      subject,
-      content,
-      status: action === 'send' ? 'sending' : 'draft',
-      total_recipients: recipients.length,
-    })
-    .select()
+    .insert(campaignData)
+    .select('id')
     .single()
 
-  if (campaignError) {
+  if (error) {
+    console.error('Campaign creation error:', error)
     return json({ error: 'Failed to create campaign' }, { status: 500 })
   }
 
-  if (action === 'send') {
-    // Get sending configuration
-    let sendingConfig = null
-    
-    if (sendMethod === 'smtp') {
-      const { data: smtpConfig } = await supabase
-        .from('smtp_configs')
-        .select('*')
-        .eq('id', configId)
-        .eq('user_id', user.id)
-        .single()
-      
-      if (smtpConfig) {
-        sendingConfig = {
-          type: 'smtp',
-          config: smtpConfig,
-        }
-      }
-    } else if (sendMethod === 'api') {
-      const { data: apiConfig } = await supabase
-        .from('email_apis')
-        .select('*')
-        .eq('id', configId)
-        .eq('user_id', user.id)
-        .single()
-      
-      if (apiConfig) {
-        sendingConfig = {
-          type: 'api',
-          config: apiConfig,
-        }
-      }
-    }
-
-    if (!sendingConfig) {
-      return json({ error: 'Invalid sending configuration' }, { status: 400 })
-    }
-
-    // Queue emails
-    for (const recipient of recipients) {
-      await emailQueue.add('send-email', {
-        campaignId: campaign.id,
-        recipientEmail: recipient.email,
-        recipientName: `${recipient.first_name || ''} ${recipient.last_name || ''}`.trim(),
-        subject,
-        content,
-        ...(sendingConfig.type === 'smtp' 
-          ? { smtpConfig: sendingConfig.config }
-          : { apiConfig: sendingConfig.config }
-        ),
-      })
-    }
+  if (action === 'save') {
+    return json({ success: 'Campaign saved as draft', campaignId: campaign.id })
+  } else {
+    // For now, just save as scheduled - actual sending would be handled by a background job
+    return redirect(`/campaigns/${campaign.id}`)
   }
-
-  return redirect('/campaigns')
 }
 
 export default function NewCampaign() {
-  const { user, recipients, smtpConfigs, emailApis } = useLoaderData<typeof loader>()
+  const { user, lists, error } = useLoaderData<typeof loader>()
   const actionData = useActionData<typeof action>()
   const navigation = useNavigation()
-  const [sendMethod, setSendMethod] = useState('smtp')
   const isSubmitting = navigation.state === 'submitting'
-
-  const hasConfigs = smtpConfigs.length > 0 || emailApis.length > 0
 
   return (
     <div className="flex h-screen bg-gray-50">
@@ -153,35 +100,27 @@ export default function NewCampaign() {
               <Link to="/campaigns" className="mr-4">
                 <Button variant="outline" size="sm">
                   <ArrowLeft className="h-4 w-4 mr-2" />
-                  Back
+                  Back to Campaigns
                 </Button>
               </Link>
               <div>
-                <h2 className="text-3xl font-bold text-gray-900">New Campaign</h2>
+                <h2 className="text-3xl font-bold text-gray-900">Create New Campaign</h2>
                 <p className="text-gray-600 mt-2">
-                  Create a new email campaign to send to your recipients.
+                  Design and send your email campaign to your audience.
                 </p>
               </div>
             </div>
 
-            {!hasConfigs && (
-              <Card className="mb-6 border-yellow-200 bg-yellow-50">
+            {error && (
+              <Card className="mb-6 border-red-200 bg-red-50">
                 <CardContent className="p-4">
-                  <p className="text-yellow-800">
-                    You need to configure at least one SMTP server or Email API before sending campaigns.{' '}
-                    <Link to="/smtp" className="underline">
-                      Set up SMTP
-                    </Link>{' '}
-                    or{' '}
-                    <Link to="/email-apis" className="underline">
-                      configure Email API
-                    </Link>
-                  </p>
+                  <p className="text-red-800">{error}</p>
                 </CardContent>
               </Card>
             )}
 
-            <Form method="post" className="space-y-6">
+            <Form method="post" className="space-y-8">
+              {/* Campaign Details */}
               <Card>
                 <CardHeader>
                   <CardTitle>Campaign Details</CardTitle>
@@ -192,162 +131,178 @@ export default function NewCampaign() {
                 <CardContent className="space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Campaign Name
+                      Campaign Name *
                     </label>
                     <Input
                       name="name"
-                      placeholder="e.g., Weekly Newsletter"
+                      placeholder="e.g., Weekly Newsletter - January 2024"
                       required
+                      className="w-full"
                     />
                   </div>
 
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Subject Line
+                      Email Subject *
                     </label>
                     <Input
                       name="subject"
-                      placeholder="e.g., Your Weekly Update"
+                      placeholder="e.g., Your Weekly Update from xMailer"
                       required
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Email Content
-                    </label>
-                    <textarea
-                      name="content"
-                      rows={10}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="Write your email content here..."
-                      required
+                      className="w-full"
                     />
                   </div>
                 </CardContent>
               </Card>
 
-              {hasConfigs && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Sending Method</CardTitle>
-                    <CardDescription>
-                      Choose how to send your emails
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="flex space-x-4">
-                      {smtpConfigs.length > 0 && (
-                        <label className="flex items-center">
-                          <input
-                            type="radio"
-                            name="sendMethod"
-                            value="smtp"
-                            checked={sendMethod === 'smtp'}
-                            onChange={(e) => setSendMethod(e.target.value)}
-                            className="mr-2"
-                          />
-                          SMTP Server
-                        </label>
-                      )}
-                      
-                      {emailApis.length > 0 && (
-                        <label className="flex items-center">
-                          <input
-                            type="radio"
-                            name="sendMethod"
-                            value="api"
-                            checked={sendMethod === 'api'}
-                            onChange={(e) => setSendMethod(e.target.value)}
-                            className="mr-2"
-                          />
-                          Email API
-                        </label>
-                      )}
-                    </div>
-
-                    {sendMethod === 'smtp' && smtpConfigs.length > 0 && (
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                          SMTP Configuration
-                        </label>
-                        <select
-                          name="configId"
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          required
-                        >
-                          <option value="">Select SMTP Config</option>
-                          {smtpConfigs.map((config: any) => (
-                            <option key={config.id} value={config.id}>
-                              {config.name} ({config.host})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    {sendMethod === 'api' && emailApis.length > 0 && (
-                      <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                          Email API
-                        </label>
-                        <select
-                          name="configId"
-                          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          required
-                        >
-                          <option value="">Select Email API</option>
-                          {emailApis.map((api: any) => (
-                            <option key={api.id} value={api.id}>
-                              {api.name} ({api.provider})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              )}
-
+              {/* Email Content */}
               <Card>
-                <CardContent className="p-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm text-gray-600">
-                        Ready to send to {recipients.length} recipients
-                      </p>
-                    </div>
-                    
-                    <div className="flex space-x-3">
-                      <Button
-                        type="submit"
-                        name="_action"
-                        value="draft"
-                        variant="outline"
-                        disabled={isSubmitting}
-                      >
-                        Save as Draft
-                      </Button>
-                      
-                      <Button
-                        type="submit"
-                        name="_action"
-                        value="send"
-                        disabled={isSubmitting || !hasConfigs || recipients.length === 0}
-                      >
-                        <Send className="h-4 w-4 mr-2" />
-                        {isSubmitting ? 'Sending...' : 'Send Campaign'}
-                      </Button>
-                    </div>
+                <CardHeader>
+                  <CardTitle>Email Content</CardTitle>
+                  <CardDescription>
+                    Write your email content (HTML supported)
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <Textarea
+                    name="content"
+                    placeholder="Write your email content here... You can use HTML tags for formatting."
+                    required
+                    className="w-full min-h-[300px]"
+                  />
+                </CardContent>
+              </Card>
+
+              {/* Audience Targeting */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Audience Targeting</CardTitle>
+                  <CardDescription>
+                    Choose who will receive this campaign
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-6">
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="targetAllSubscribers"
+                      name="targetAllSubscribers"
+                      value="true"
+                      className="rounded border-gray-300"
+                    />
+                    <label htmlFor="targetAllSubscribers" className="text-sm font-medium text-gray-700">
+                      Target all subscribers
+                    </label>
                   </div>
+
+                  {lists.length > 0 && (
+                    <>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Include Lists
+                        </label>
+                        <div className="space-y-2 max-h-32 overflow-y-auto">
+                          {lists.map((list: any) => (
+                            <div key={list.id} className="flex items-center space-x-2">
+                              <input
+                                type="checkbox"
+                                id={`include-${list.id}`}
+                                name="includeLists"
+                                value={list.id}
+                                className="rounded border-gray-300"
+                              />
+                              <label htmlFor={`include-${list.id}`} className="text-sm text-gray-700 flex items-center">
+                                <div
+                                  className="w-3 h-3 rounded-full mr-2"
+                                  style={{ backgroundColor: list.color }}
+                                />
+                                {list.name} ({list.subscribed_members || 0} subscribers)
+                              </label>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Exclude Lists (Optional)
+                        </label>
+                        <div className="space-y-2 max-h-32 overflow-y-auto">
+                          {lists.map((list: any) => (
+                            <div key={list.id} className="flex items-center space-x-2">
+                              <input
+                                type="checkbox"
+                                id={`exclude-${list.id}`}
+                                name="excludeLists"
+                                value={list.id}
+                                className="rounded border-gray-300"
+                              />
+                              <label htmlFor={`exclude-${list.id}`} className="text-sm text-gray-700 flex items-center">
+                                <div
+                                  className="w-3 h-3 rounded-full mr-2"
+                                  style={{ backgroundColor: list.color }}
+                                />
+                                {list.name}
+                              </label>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {lists.length === 0 && (
+                    <div className="text-center py-6 bg-gray-50 rounded-lg">
+                      <p className="text-gray-600 mb-4">
+                        You don't have any active lists yet.
+                      </p>
+                      <Link to="/lists">
+                        <Button variant="outline">Create Your First List</Button>
+                      </Link>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
 
               {actionData?.error && (
-                <div className="text-red-600 text-sm">
-                  {actionData.error}
-                </div>
+                <Card className="border-red-200 bg-red-50">
+                  <CardContent className="p-4">
+                    <p className="text-red-800">{actionData.error}</p>
+                  </CardContent>
+                </Card>
               )}
+
+              {actionData?.success && (
+                <Card className="border-green-200 bg-green-50">
+                  <CardContent className="p-4">
+                    <p className="text-green-800">{actionData.success}</p>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Actions */}
+              <div className="flex space-x-4">
+                <Button
+                  type="submit"
+                  name="_action"
+                  value="save"
+                  variant="outline"
+                  disabled={isSubmitting}
+                >
+                  <Save className="h-4 w-4 mr-2" />
+                  {isSubmitting ? 'Saving...' : 'Save as Draft'}
+                </Button>
+                
+                <Button
+                  type="submit"
+                  name="_action"
+                  value="schedule"
+                  disabled={isSubmitting}
+                >
+                  <Send className="h-4 w-4 mr-2" />
+                  {isSubmitting ? 'Creating...' : 'Create & Schedule'}
+                </Button>
+              </div>
             </Form>
           </div>
         </main>

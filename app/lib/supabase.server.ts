@@ -1,180 +1,41 @@
 import { createClient } from '@supabase/supabase-js'
 
-const supabaseUrl = process.env.SUPABASE_URL!
-const supabaseKey = process.env.SUPABASE_ANON_KEY!
-
-export const supabase = createClient(supabaseUrl, supabaseKey)
-
-export type Database = {
-  public: {
-    Tables: {
-      profiles: {
-        Row: {
-          id: string
-          email: string
-          full_name: string | null
-          created_at: string
-          updated_at: string
-        }
-        Insert: {
-          id: string
-          email: string
-          full_name?: string | null
-          created_at?: string
-          updated_at?: string
-        }
-        Update: {
-          id?: string
-          email?: string
-          full_name?: string | null
-          updated_at?: string
-        }
-      }
-      smtp_configs: {
-        Row: {
-          id: string
-          user_id: string
-          name: string
-          host: string
-          port: number
-          username: string
-          password: string
-          secure: boolean
-          is_active: boolean
-          created_at: string
-          updated_at: string
-        }
-        Insert: {
-          id?: string
-          user_id: string
-          name: string
-          host: string
-          port: number
-          username: string
-          password: string
-          secure?: boolean
-          is_active?: boolean
-          created_at?: string
-          updated_at?: string
-        }
-        Update: {
-          id?: string
-          user_id?: string
-          name?: string
-          host?: string
-          port?: number
-          username?: string
-          password?: string
-          secure?: boolean
-          is_active?: boolean
-          updated_at?: string
-        }
-      }
-      email_apis: {
-        Row: {
-          id: string
-          user_id: string
-          provider: string
-          api_key: string
-          name: string
-          is_active: boolean
-          created_at: string
-          updated_at: string
-        }
-        Insert: {
-          id?: string
-          user_id: string
-          provider: string
-          api_key: string
-          name: string
-          is_active?: boolean
-          created_at?: string
-          updated_at?: string
-        }
-        Update: {
-          id?: string
-          user_id?: string
-          provider?: string
-          api_key?: string
-          name?: string
-          is_active?: boolean
-          updated_at?: string
-        }
-      }
-      campaigns: {
-        Row: {
-          id: string
-          user_id: string
-          name: string
-          subject: string
-          content: string
-          status: string
-          scheduled_at: string | null
-          sent_count: number
-          total_recipients: number
-          created_at: string
-          updated_at: string
-        }
-        Insert: {
-          id?: string
-          user_id: string
-          name: string
-          subject: string
-          content: string
-          status?: string
-          scheduled_at?: string | null
-          sent_count?: number
-          total_recipients?: number
-          created_at?: string
-          updated_at?: string
-        }
-        Update: {
-          id?: string
-          user_id?: string
-          name?: string
-          subject?: string
-          content?: string
-          status?: string
-          scheduled_at?: string | null
-          sent_count?: number
-          total_recipients?: number
-          updated_at?: string
-        }
-      }
-      recipients: {
-        Row: {
-          id: string
-          user_id: string
-          email: string
-          first_name: string | null
-          last_name: string | null
-          tags: string[]
-          subscribed: boolean
-          created_at: string
-          updated_at: string
-        }
-        Insert: {
-          id?: string
-          user_id: string
-          email: string
-          first_name?: string | null
-          last_name?: string | null
-          tags?: string[]
-          subscribed?: boolean
-          created_at?: string
-          updated_at?: string
-        }
-        Update: {
-          id?: string
-          user_id?: string
-          email?: string
-          first_name?: string | null
-          last_name?: string | null
-          tags?: string[]
-          subscribed?: boolean
-          updated_at?: string
-        }
-      }
-    }
+// Helper function to get environment variables with better error handling
+const getEnvVar = (name: string): string => {
+  // Try different ways to access environment variables in Vite/Remix
+  let value: string | undefined
+  
+  try {
+    value = process.env[name]
+  } catch (e) {
+    // Fallback for different environments
+    value = (globalThis as any).process?.env?.[name] || (import.meta as any).env?.[name]
   }
+  
+  if (!value) {
+    console.error(`Missing environment variable: ${name}`)
+    console.error('Available process.env keys:', Object.keys(process.env || {}).filter(key => key.includes('SUPABASE')))
+    throw new Error(`${name} environment variable is missing. Please check your .env file and restart the server.`)
+  }
+  
+  return value
 }
+
+const supabaseUrl = getEnvVar('SUPABASE_URL')
+const supabaseServiceKey = getEnvVar('SUPABASE_SERVICE_ROLE_KEY')
+
+console.log('✅ Supabase configuration loaded successfully')
+
+export const supabase = createClient(supabaseUrl, supabaseServiceKey, {
+  auth: {
+    autoRefreshToken: false,
+    persistSession: false,
+  },
+})
+
+// Test the connection
+supabase
+  .from('profiles')
+  .select('count', { count: 'exact', head: true })
+  .then(() => console.log('✅ Supabase connection test successful'))
+  .catch((error) => console.error('❌ Supabase connection test failed:', error.message))
