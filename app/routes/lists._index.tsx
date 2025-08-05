@@ -313,3 +313,87 @@ export default function Lists() {
                             />
                             <div>
                               <h4 className="font-semibold text-gray-900">{list.name}</h4>
+                              {list.description && (
+                                <p className="text-sm text-gray-600 mt-1">{list.description}</p>
+                              )}
+                            </div>
+                          </div>
+                          <span
+                            className={`px-2 py-1 text-xs rounded-full ${
+                              list.is_active
+                                ? 'bg-green-100 text-green-800'
+                                : 'bg-gray-100 text-gray-800'
+                            }`}
+                          >
+                            {list.is_active ? 'Active' : 'Inactive'}
+                          </span>
+                        </div>
+
+                        <div className="space-y-2 mb-4">
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-600">Total Members:</span>
+                            <span className="font-medium">{list.total_members || 0}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-600">Subscribed:</span>
+                            <span className="font-medium text-green-600">{list.subscribed_members || 0}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-600">Created:</span>
+                            <span className="text-gray-500">{new Date(list.created_at).toLocaleDateString()}</span>
+                          </div>
+                        </div>
+
+                        <div className="flex space-x-2">
+                          <Link to={`/lists/${list.id}`} className="flex-1">
+                            <Button variant="outline" size="sm" className="w-full">
+                              <Eye className="h-4 w-4 mr-2" />
+                              View
+                            </Button>
+                          </Link>
+                          
+                          <Form method="post" className="inline">
+                            <input type="hidden" name="_action" value="toggle" />
+                            <input type="hidden" name="listId" value={list.id} />
+                            <input type="hidden" name="isActive" value={list.is_active} />
+                            <Button
+                              type="submit"
+                              variant="outline"
+                              size="sm"
+                              disabled={isSubmitting}
+                            >
+                              {list.is_active ? 'Deactivate' : 'Activate'}
+                            </Button>
+                          </Form>
+                          
+                          <Form method="post" className="inline">
+                            <input type="hidden" name="_action" value="delete" />
+                            <input type="hidden" name="listId" value={list.id} />
+                            <Button
+                              type="submit"
+                              variant="outline"
+                              size="sm"
+                              className="text-red-600 hover:text-red-700"
+                              disabled={isSubmitting}
+                              onClick={(e) => {
+                                if (!confirm('Are you sure you want to delete this list? This action cannot be undone.')) {
+                                  e.preventDefault()
+                                }
+                              }}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </Form>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  )
+}
