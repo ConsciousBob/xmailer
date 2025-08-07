@@ -1,294 +1,283 @@
-import { supabase } from './supabase.server'
-import nodemailer from 'nodemailer'
+import nodemailer from 'nodemailer';
+import type { Transporter } from 'nodemailer';
 
-export interface EmailData {
-  to: string
-  subject: string
-  html: string
-  from?: string
+export interface EmailConfig {
+  host: string;
+  port: number;
+  secure?: boolean;
+  auth: {
+    user: string;
+    pass: string;
+  };
 }
 
-export interface Campaign {
-  id: string
-  user_id: string
-  name: string
-  subject: string
-  html_content: string
-  target_all_subscribers: boolean
-  include_lists: string[] | null
-  exclude_lists: string[] | null
-  status: string
-  total_recipients: number
-  sent_count: number
+export interface EmailMessage {
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
 }
 
-export interface SMTPConfig {
-  id: string
-  user_id: string
-  name: string
-  host: string
-  port: number
-  username: string
-  password: string
-  from_email: string
-  from_name: string
-  use_tls: boolean
-  use_ssl: boolean
-  is_default: boolean
-  is_active: boolean
+function validateEmailConfig(config: any): config is EmailConfig {
+  return (
+    config &&
+    typeof config.host === 'string' &&
+    typeof config.port === 'number' &&
+    config.auth &&
+    typeof config.auth.user === 'string' &&
+    typeof config.auth.pass === 'string'
+  );
 }
 
-export async function getUserSMTPConfig(userId: string): Promise<SMTPConfig | null> {
-  const { data: config, error } = await supabase
-    .from('smtp_configs')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('is_active', true)
-    .eq('is_default', true)
-    .single()
-
-  if (error || !config) {
-    // Fallback to any active config if no default is set
-    const { data: fallbackConfig } = await supabase
-      .from('smtp_configs')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('is_active', true)
-      .limit(1)
-      .single()
-
-    return fallbackConfig || null
-  }
-
-  return config
-}
-
-export async function createTransporter(smtpConfig: SMTPConfig) {
-  const transportConfig: any = {
-    host: smtpConfig.host,
-    port: smtpConfig.port,
-    secure: smtpConfig.use_ssl, // true for 465, false for other ports
-    auth: {
-      user: smtpConfig.username,
-      pass: smtpConfig.password, // In production, decrypt this
-    },
-  }
-
-  if (smtpConfig.use_tls) {
-    transportConfig.tls = {
-      ciphers: 'SSLv3'
-    }
-  }
-
-  return nodemailer.createTransporter(transportConfig)
-}
-
-export async function sendEmail(emailData: EmailData, userId: string): Promise<boolean> {
+// Alternative HTTP-based email sending for Postmark
+async function sendEmailViaPostmarkAPI(
+  apiToken: string,
+  message: EmailMessage,
+  fromEmail: string
+): Promise<{ success: boolean; messageId?: string; error?: string }> {
   try {
-    // Get user's SMTP configuration
-    const smtpConfig = await getUserSMTPConfig(userId)
-    
-    if (!smtpConfig) {
-      console.error('No SMTP configuration found for user:', userId)
-      return false
-    }
+    const response = await fetch('https://api.postmarkapp.com/email', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+        'X-Postmark-Server-Token': apiToken,
+      },
+      body: JSON.stringify({
+        From: fromEmail,
+        To: message.to,
+        Subject: message.subject,
+        HtmlBody: message.html,
+        TextBody: message.text || message.html.replace(/<[^>]*>/g, ''),
+        MessageStream: 'outbound',
+      }),
+    });
 
-    // Create transporter with user's SMTP config
-    const transporter = await createTransporter(smtpConfig)
+    const result = await response.json();
 
-    // Prepare email options
-    const mailOptions = {
-      from: `${smtpConfig.from_name} <${smtpConfig.from_email}>`,
-      to: emailData.to,
-      subject: emailData.subject,
-      html: emailData.html,
-    }
-
-    // Send email
-    const info = await transporter.sendMail(mailOptions)
-    console.log('Email sent successfully:', info.messageId)
-    
-    return true
-  } catch (error) {
-    console.error('Email sending error:', error)
-    return false
-  }
-}
-
-export async function testSMTPConnection(smtpConfig: SMTPConfig): Promise<boolean> {
-  try {
-    const transporter = await createTransporter(smtpConfig)
-    await transporter.verify()
-    return true
-  } catch (error) {
-    console.error('SMTP connection test failed:', error)
-    return false
-  }
-}
-
-export async function getRecipients(campaign: Campaign): Promise<string[]> {
-  let query = supabase
-    .from('subscribers')
-    .select('email')
-    .eq('user_id', campaign.user_id)
-    .eq('status', 'subscribed')
-
-  if (!campaign.target_all_subscribers && campaign.include_lists) {
-    // Get subscribers from specific lists
-    const { data: listSubscribers } = await supabase
-      .from('list_subscribers')
-      .select('subscriber_id')
-      .in('list_id', campaign.include_lists)
-      .eq('status', 'subscribed')
-
-    if (listSubscribers && listSubscribers.length > 0) {
-      const subscriberIds = listSubscribers.map(ls => ls.subscriber_id)
-      query = query.in('id', subscriberIds)
+    if (response.ok) {
+      return {
+        success: true,
+        messageId: result.MessageID,
+      };
     } else {
-      return []
+      return {
+        success: false,
+        error: result.Message || 'Failed to send email via Postmark API',
+      };
     }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Network error',
+    };
   }
-
-  if (campaign.exclude_lists && campaign.exclude_lists.length > 0) {
-    // Exclude subscribers from specific lists
-    const { data: excludeSubscribers } = await supabase
-      .from('list_subscribers')
-      .select('subscriber_id')
-      .in('list_id', campaign.exclude_lists)
-      .eq('status', 'subscribed')
-
-    if (excludeSubscribers && excludeSubscribers.length > 0) {
-      const excludeIds = excludeSubscribers.map(ls => ls.subscriber_id)
-      query = query.not('id', 'in', `(${excludeIds.join(',')})`)
-    }
-  }
-
-  const { data: subscribers, error } = await query
-
-  if (error) {
-    console.error('Error fetching recipients:', error)
-    return []
-  }
-
-  return subscribers?.map(s => s.email) || []
 }
 
-export async function processCampaign(campaignId: string): Promise<void> {
+// Test Postmark API connection
+async function testPostmarkAPI(apiToken: string): Promise<{ success: boolean; error?: string }> {
   try {
-    // Get campaign details
-    const { data: campaign, error: campaignError } = await supabase
-      .from('campaigns')
-      .select('*')
-      .eq('id', campaignId)
-      .single()
+    const response = await fetch('https://api.postmarkapp.com/server', {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'X-Postmark-Server-Token': apiToken,
+      },
+    });
 
-    if (campaignError || !campaign) {
-      console.error('Campaign not found:', campaignError)
-      return
+    if (response.ok) {
+      const result = await response.json();
+      return { 
+        success: true,
+      };
+    } else {
+      const error = await response.json();
+      return {
+        success: false,
+        error: error.Message || 'Invalid API token or server error',
+      };
     }
-
-    // Check if user has SMTP configuration
-    const smtpConfig = await getUserSMTPConfig(campaign.user_id)
-    if (!smtpConfig) {
-      await supabase
-        .from('campaigns')
-        .update({ 
-          status: 'failed',
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', campaignId)
-      console.error('No SMTP configuration found for user:', campaign.user_id)
-      return
-    }
-
-    // Update status to sending
-    await supabase
-      .from('campaigns')
-      .update({ 
-        status: 'sending',
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', campaignId)
-
-    // Get recipients (now from subscribers table only)
-    const recipients = await getRecipients(campaign)
-    
-    if (recipients.length === 0) {
-      await supabase
-        .from('campaigns')
-        .update({ 
-          status: 'failed',
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', campaignId)
-      return
-    }
-
-    // Update total recipients
-    await supabase
-      .from('campaigns')
-      .update({ 
-        total_recipients: recipients.length,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', campaignId)
-
-    let sentCount = 0
-    const batchSize = 10 // Send in batches to avoid overwhelming the email service
-
-    for (let i = 0; i < recipients.length; i += batchSize) {
-      const batch = recipients.slice(i, i + batchSize)
-      
-      // Send emails in parallel for this batch
-      const sendPromises = batch.map(async (email) => {
-        const success = await sendEmail({
-          to: email,
-          subject: campaign.subject,
-          html: campaign.html_content,
-        }, campaign.user_id)
-        
-        if (success) {
-          sentCount++
-        }
-        
-        return success
-      })
-
-      await Promise.all(sendPromises)
-
-      // Update progress
-      await supabase
-        .from('campaigns')
-        .update({ 
-          sent_count: sentCount,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', campaignId)
-
-      // Small delay between batches
-      await new Promise(resolve => setTimeout(resolve, 1000))
-    }
-
-    // Mark as completed
-    await supabase
-      .from('campaigns')
-      .update({ 
-        status: sentCount === recipients.length ? 'sent' : 'partially_sent',
-        sent_count: sentCount,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', campaignId)
-
   } catch (error) {
-    console.error('Error processing campaign:', error)
-    
-    // Mark as failed
-    await supabase
-      .from('campaigns')
-      .update({ 
-        status: 'failed',
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', campaignId)
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Network error',
+    };
   }
+}
+
+export function createTransporter(config: EmailConfig): Transporter {
+  if (!validateEmailConfig(config)) {
+    throw new Error('Invalid email configuration: missing required fields (host, port, auth.user, auth.pass)');
+  }
+
+  // Optimized configuration for WebContainer environment
+  const transporterConfig = {
+    host: config.host,
+    port: config.port,
+    secure: config.port === 465,
+    auth: {
+      user: config.auth.user,
+      pass: config.auth.pass,
+    },
+    // Reduced timeouts for WebContainer
+    connectionTimeout: 5000, // 5 seconds
+    greetingTimeout: 3000, // 3 seconds
+    socketTimeout: 5000, // 5 seconds
+    // Disable pooling to avoid connection issues
+    pool: false,
+    // More lenient TLS settings
+    tls: {
+      rejectUnauthorized: false,
+      ciphers: 'SSLv3',
+    },
+    // Disable some features that might cause issues
+    disableFileAccess: true,
+    disableUrlAccess: true,
+  };
+
+  return nodemailer.createTransport(transporterConfig);
+}
+
+export async function sendEmail(
+  config: EmailConfig,
+  message: EmailMessage,
+  fromEmail: string
+): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  // Check if this is Postmark and try API first
+  if (config.host === 'smtp.postmarkapp.com') {
+    console.log('Attempting to send via Postmark API...');
+    const apiResult = await sendEmailViaPostmarkAPI(config.auth.user, message, fromEmail);
+    if (apiResult.success) {
+      return apiResult;
+    }
+    console.log('Postmark API failed, falling back to SMTP:', apiResult.error);
+  }
+
+  // Fallback to SMTP
+  let transporter: Transporter | null = null;
+  
+  try {
+    if (!validateEmailConfig(config)) {
+      throw new Error('Invalid email configuration');
+    }
+
+    if (!message.to || !message.subject || !message.html) {
+      throw new Error('Missing required email fields: to, subject, or content');
+    }
+
+    transporter = createTransporter(config);
+    
+    // Skip verification for faster sending
+    console.log('Sending email via SMTP...');
+    
+    const result = await transporter.sendMail({
+      from: fromEmail,
+      to: message.to,
+      subject: message.subject,
+      html: message.html,
+      text: message.text || message.html.replace(/<[^>]*>/g, ''),
+    });
+
+    console.log('Email sent successfully via SMTP:', result.messageId);
+    
+    return {
+      success: true,
+      messageId: result.messageId,
+    };
+  } catch (error) {
+    console.error('Failed to send email via SMTP:', error);
+    
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
+    };
+  } finally {
+    if (transporter) {
+      transporter.close();
+    }
+  }
+}
+
+export async function testSMTPConnection(config: EmailConfig): Promise<{ success: boolean; error?: string }> {
+  // For Postmark, test API connection instead of SMTP
+  if (config.host === 'smtp.postmarkapp.com') {
+    console.log('Testing Postmark API connection...');
+    return await testPostmarkAPI(config.auth.user);
+  }
+
+  // For other providers, test SMTP with timeout
+  let transporter: Transporter | null = null;
+  
+  try {
+    if (!validateEmailConfig(config)) {
+      return {
+        success: false,
+        error: 'Invalid configuration: missing required fields',
+      };
+    }
+
+    transporter = createTransporter(config);
+    
+    // Test with shorter timeout
+    const verifyPromise = transporter.verify();
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Connection timeout after 8 seconds')), 8000);
+    });
+
+    await Promise.race([verifyPromise, timeoutPromise]);
+    
+    return { success: true };
+  } catch (error) {
+    console.error('SMTP connection test failed:', error);
+    
+    let errorMessage = 'Connection failed';
+    if (error instanceof Error) {
+      if (error.message.includes('ETIMEDOUT') || error.message.includes('Greeting never received')) {
+        errorMessage = 'Connection timeout - this may be due to network restrictions in the current environment';
+      } else {
+        errorMessage = error.message;
+      }
+    }
+    
+    return {
+      success: false,
+      error: errorMessage,
+    };
+  } finally {
+    if (transporter) {
+      transporter.close();
+    }
+  }
+}
+
+export function resetTransporter(): void {
+  // No-op since we don't cache transporters
+}
+
+// Helper function to send test email
+export async function sendTestEmail(
+  config: EmailConfig,
+  fromEmail: string,
+  toEmail: string
+): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  const testMessage: EmailMessage = {
+    to: toEmail,
+    subject: 'Test Email from xMailer',
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #333;">Test Email from xMailer</h2>
+        <p>This is a test email sent from xMailer to verify your email configuration.</p>
+        <p>If you received this email, your email settings are working correctly! 🎉</p>
+        <hr style="border: 1px solid #eee; margin: 20px 0;">
+        <p style="color: #666; font-size: 14px;">
+          <strong>Sent at:</strong> ${new Date().toISOString()}<br>
+          <strong>From:</strong> ${fromEmail}<br>
+          <strong>To:</strong> ${toEmail}
+        </p>
+      </div>
+    `,
+    text: `Test Email from xMailer\n\nThis is a test email sent from xMailer to verify your email configuration.\n\nIf you received this email, your email settings are working correctly!\n\nSent at: ${new Date().toISOString()}\nFrom: ${fromEmail}\nTo: ${toEmail}`,
+  };
+
+  return await sendEmail(config, testMessage, fromEmail);
 }
