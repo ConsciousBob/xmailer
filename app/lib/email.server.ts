@@ -18,6 +18,25 @@ export interface EmailMessage {
   text?: string;
 }
 
+export interface Campaign {
+  id: string;
+  name: string;
+  subject: string;
+  content: string;
+  fromEmail: string;
+  recipients: string[];
+  status: 'draft' | 'sending' | 'sent' | 'failed';
+  sentCount?: number;
+  failedCount?: number;
+}
+
+export interface CampaignResult {
+  success: boolean;
+  sentCount: number;
+  failedCount: number;
+  errors: string[];
+}
+
 function validateEmailConfig(config: any): config is EmailConfig {
   return (
     config &&
@@ -280,4 +299,134 @@ export async function sendTestEmail(
   };
 
   return await sendEmail(config, testMessage, fromEmail);
+}
+
+// Campaign processing function
+export async function processCampaign(
+  campaignId: string,
+  campaign: Campaign,
+  config: EmailConfig
+): Promise<CampaignResult> {
+  console.log(`Starting campaign processing for: ${campaign.name} (${campaignId})`);
+  
+  let sentCount = 0;
+  let failedCount = 0;
+  const errors: string[] = [];
+
+  // Validate campaign data
+  if (!campaign.recipients || campaign.recipients.length === 0) {
+    return {
+      success: false,
+      sentCount: 0,
+      failedCount: 0,
+      errors: ['No recipients found for campaign'],
+    };
+  }
+
+  if (!campaign.subject || !campaign.content) {
+    return {
+      success: false,
+      sentCount: 0,
+      failedCount: 0,
+      errors: ['Campaign subject or content is missing'],
+    };
+  }
+
+  // Process each recipient
+  for (const recipient of campaign.recipients) {
+    try {
+      // Validate email address
+      if (!recipient || !recipient.includes('@')) {
+        failedCount++;
+        errors.push(`Invalid email address: ${recipient}`);
+        continue;
+      }
+
+      // Create email message
+      const message: EmailMessage = {
+        to: recipient,
+        subject: campaign.subject,
+        html: campaign.content,
+        text: campaign.content.replace(/<[^>]*>/g, ''), // Strip HTML for text version
+      };
+
+      // Send email
+      const result = await sendEmail(config, message, campaign.fromEmail);
+      
+      if (result.success) {
+        sentCount++;
+        console.log(`Email sent successfully to ${recipient}: ${result.messageId}`);
+      } else {
+        failedCount++;
+        errors.push(`Failed to send to ${recipient}: ${result.error}`);
+        console.error(`Failed to send to ${recipient}:`, result.error);
+      }
+
+      // Add small delay between emails to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+    } catch (error) {
+      failedCount++;
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      errors.push(`Error sending to ${recipient}: ${errorMessage}`);
+      console.error(`Error sending to ${recipient}:`, error);
+    }
+  }
+
+  const success = sentCount > 0 && failedCount === 0;
+  
+  console.log(`Campaign processing completed: ${sentCount} sent, ${failedCount} failed`);
+  
+  return {
+    success,
+    sentCount,
+    failedCount,
+    errors,
+  };
+}
+
+// Bulk email sending function
+export async function sendBulkEmails(
+  config: EmailConfig,
+  messages: Array<{ to: string; subject: string; html: string; text?: string }>,
+  fromEmail: string,
+  onProgress?: (sent: number, failed: number, total: number) => void
+): Promise<CampaignResult> {
+  let sentCount = 0;
+  let failedCount = 0;
+  const errors: string[] = [];
+  const total = messages.length;
+
+  for (const message of messages) {
+    try {
+      const result = await sendEmail(config, message, fromEmail);
+      
+      if (result.success) {
+        sentCount++;
+      } else {
+        failedCount++;
+        errors.push(`Failed to send to ${message.to}: ${result.error}`);
+      }
+
+      // Call progress callback if provided
+      if (onProgress) {
+        onProgress(sentCount, failedCount, total);
+      }
+
+      // Add small delay between emails
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+    } catch (error) {
+      failedCount++;
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      errors.push(`Error sending to ${message.to}: ${errorMessage}`);
+    }
+  }
+
+  return {
+    success: sentCount > 0 && failedCount === 0,
+    sentCount,
+    failedCount,
+    errors,
+  };
 }
