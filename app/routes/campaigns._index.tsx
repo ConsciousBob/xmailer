@@ -108,7 +108,7 @@ export default function Campaigns() {
                         <div className="flex items-center text-sm text-gray-600">
                           <Users className="h-4 w-4 mr-2" />
                           <span>
-                            {campaign.sent_count} / {campaign.total_recipients} sent
+                            {campaign.sent_count || 0} / {campaign.total_recipients || 0} sent
                           </span>
                         </div>
                         
@@ -132,7 +132,7 @@ export default function Campaigns() {
                             style={{
                               width: `${
                                 campaign.total_recipients > 0
-                                  ? (campaign.sent_count / campaign.total_recipients) * 100
+                                  ? ((campaign.sent_count || 0) / campaign.total_recipients) * 100
                                   : 0
                               }%`,
                             }}

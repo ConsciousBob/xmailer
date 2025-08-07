@@ -49,9 +49,11 @@ export default function Index() {
                   Start Free Trial
                 </Button>
               </Link>
-              <Button variant="outline" size="lg" className="w-full sm:w-auto">
-                Watch Demo
-              </Button>
+              <Link to="/demo">
+                <Button variant="outline" size="lg" className="w-full sm:w-auto">
+                  View Demo
+                </Button>
+              </Link>
             </div>
           </div>
         </div>
@@ -149,9 +151,11 @@ export default function Index() {
                 Start Your Free Trial
               </Button>
             </Link>
-            <Button size="lg" variant="outline" className="w-full sm:w-auto border-white text-white hover:bg-white hover:text-blue-600">
-              Contact Sales
-            </Button>
+            <Link to="/demo">
+              <Button size="lg" variant="outline" className="w-full sm:w-auto border-white text-white hover:bg-white hover:text-blue-600">
+                View Demo
+              </Button>
+            </Link>
           </div>
         </div>
       </section>

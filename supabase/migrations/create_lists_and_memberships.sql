@@ -15,9 +15,9 @@
     - `list_memberships`
       - `id` (uuid, primary key, default gen_random_uuid())
       - `list_id` (uuid, references lists, not null)
-      - `recipient_id` (uuid, references recipients, not null)
+      - `subscriber_id` (uuid, references subscribers, not null)
       - `added_at` (timestamp with timezone, default now())
-      - Unique constraint on list_id + recipient_id
+      - Unique constraint on list_id + subscriber_id
 
   2. Security
     - Enable RLS on both tables
@@ -25,13 +25,13 @@
 
   3. Indexes
     - Index on user_id for lists
-    - Index on list_id and recipient_id for memberships
-    - Unique constraint on list_id + recipient_id
+    - Index on list_id and subscriber_id for memberships
+    - Unique constraint on list_id + subscriber_id
 
   4. Functions
     - Function to get list member count
-    - Function to add recipient to list
-    - Function to remove recipient from list
+    - Function to add subscriber to list
+    - Function to remove subscriber from list
 */
 
 -- Create lists table
@@ -51,16 +51,16 @@ CREATE TABLE IF NOT EXISTS lists (
 CREATE TABLE IF NOT EXISTS list_memberships (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   list_id uuid REFERENCES lists(id) ON DELETE CASCADE NOT NULL,
-  recipient_id uuid REFERENCES recipients(id) ON DELETE CASCADE NOT NULL,
+  subscriber_id uuid REFERENCES subscribers(id) ON DELETE CASCADE NOT NULL,
   added_at timestamptz DEFAULT now(),
-  UNIQUE(list_id, recipient_id)
+  UNIQUE(list_id, subscriber_id)
 );
 
 -- Create indexes
 CREATE INDEX IF NOT EXISTS lists_user_id_idx ON lists(user_id);
 CREATE INDEX IF NOT EXISTS lists_active_idx ON lists(is_active);
 CREATE INDEX IF NOT EXISTS list_memberships_list_id_idx ON list_memberships(list_id);
-CREATE INDEX IF NOT EXISTS list_memberships_recipient_id_idx ON list_memberships(recipient_id);
+CREATE INDEX IF NOT EXISTS list_memberships_subscriber_id_idx ON list_memberships(subscriber_id);
 
 -- Enable RLS
 ALTER TABLE lists ENABLE ROW LEVEL SECURITY;
@@ -101,31 +101,31 @@ BEGIN
   RETURN (
     SELECT COUNT(*)::integer
     FROM list_memberships lm
-    JOIN recipients r ON r.id = lm.recipient_id
+    JOIN subscribers s ON s.id = lm.subscriber_id
     WHERE lm.list_id = list_uuid
-    AND r.subscribed = true
+    AND s.status = 'subscribed'
   );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Function to add recipient to list
-CREATE OR REPLACE FUNCTION add_recipient_to_list(list_uuid uuid, recipient_uuid uuid)
+-- Function to add subscriber to list
+CREATE OR REPLACE FUNCTION add_subscriber_to_list(list_uuid uuid, subscriber_uuid uuid)
 RETURNS boolean AS $$
 BEGIN
-  INSERT INTO list_memberships (list_id, recipient_id)
-  VALUES (list_uuid, recipient_uuid)
-  ON CONFLICT (list_id, recipient_id) DO NOTHING;
+  INSERT INTO list_memberships (list_id, subscriber_id)
+  VALUES (list_uuid, subscriber_uuid)
+  ON CONFLICT (list_id, subscriber_id) DO NOTHING;
   
   RETURN FOUND;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Function to remove recipient from list
-CREATE OR REPLACE FUNCTION remove_recipient_from_list(list_uuid uuid, recipient_uuid uuid)
+-- Function to remove subscriber from list
+CREATE OR REPLACE FUNCTION remove_subscriber_from_list(list_uuid uuid, subscriber_uuid uuid)
 RETURNS boolean AS $$
 BEGIN
   DELETE FROM list_memberships
-  WHERE list_id = list_uuid AND recipient_id = recipient_uuid;
+  WHERE list_id = list_uuid AND subscriber_id = subscriber_uuid;
   
   RETURN FOUND;
 END;
@@ -142,8 +142,8 @@ LEFT JOIN (
   SELECT 
     lm.list_id,
     COUNT(*) as total_members,
-    COUNT(CASE WHEN r.subscribed = true THEN 1 END) as subscribed_members
+    COUNT(CASE WHEN s.status = 'subscribed' THEN 1 END) as subscribed_members
   FROM list_memberships lm
-  JOIN recipients r ON r.id = lm.recipient_id
+  JOIN subscribers s ON s.id = lm.subscriber_id
   GROUP BY lm.list_id
 ) member_counts ON l.id = member_counts.list_id;

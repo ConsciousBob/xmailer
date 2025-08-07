@@ -12,23 +12,23 @@ import { Plus, Users, Trash2, Upload, Download } from 'lucide-react'
 export async function loader({ request }: LoaderFunctionArgs) {
   const user = await requireAuth(request)
   
-  const { data: recipients, error } = await supabase
-    .from('recipients')
+  const { data: subscribers, error } = await supabase
+    .from('subscribers')
     .select('*')
     .eq('user_id', user.id)
     .order('created_at', { ascending: false })
 
   if (error) {
-    throw new Error('Failed to load recipients')
+    throw new Error('Failed to load subscribers')
   }
 
   const stats = {
-    total: recipients.length,
-    subscribed: recipients.filter(r => r.subscribed).length,
-    unsubscribed: recipients.filter(r => !r.subscribed).length,
+    total: subscribers.length,
+    subscribed: subscribers.filter(s => s.status === 'subscribed').length,
+    unsubscribed: subscribers.filter(s => s.status === 'unsubscribed').length,
   }
 
-  return json({ user, recipients, stats })
+  return json({ user, subscribers, stats })
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -46,13 +46,12 @@ export async function action({ request }: ActionFunctionArgs) {
       return json({ error: 'Email is required' }, { status: 400 })
     }
 
-    const { error } = await supabase.from('recipients').insert({
+    const { error } = await supabase.from('subscribers').insert({
       user_id: user.id,
       email,
       first_name: firstName || null,
       last_name: lastName || null,
-      tags: tags ? tags.split(',').map(t => t.trim()) : [],
-      subscribed: true,
+      status: 'subscribed',
     })
 
     if (error) {
@@ -66,12 +65,12 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (action === 'delete') {
-    const recipientId = formData.get('recipientId') as string
+    const subscriberId = formData.get('subscriberId') as string
     
     const { error } = await supabase
-      .from('recipients')
+      .from('subscribers')
       .delete()
-      .eq('id', recipientId)
+      .eq('id', subscriberId)
       .eq('user_id', user.id)
 
     if (error) {
@@ -82,13 +81,19 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (action === 'toggle-subscription') {
-    const recipientId = formData.get('recipientId') as string
-    const subscribed = formData.get('subscribed') === 'true'
+    const subscriberId = formData.get('subscriberId') as string
+    const currentStatus = formData.get('status') as string
+    
+    const newStatus = currentStatus === 'subscribed' ? 'unsubscribed' : 'subscribed'
     
     const { error } = await supabase
-      .from('recipients')
-      .update({ subscribed: !subscribed, updated_at: new Date().toISOString() })
-      .eq('id', recipientId)
+      .from('subscribers')
+      .update({ 
+        status: newStatus, 
+        unsubscribed_at: newStatus === 'unsubscribed' ? new Date().toISOString() : null,
+        updated_at: new Date().toISOString() 
+      })
+      .eq('id', subscriberId)
       .eq('user_id', user.id)
 
     if (error) {
@@ -102,7 +107,7 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function Recipients() {
-  const { user, recipients, stats } = useLoaderData<typeof loader>()
+  const { user, subscribers, stats } = useLoaderData<typeof loader>()
   const actionData = useActionData<typeof action>()
   const navigation = useNavigation()
   const isSubmitting = navigation.state === 'submitting'
@@ -262,7 +267,7 @@ export default function Recipients() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                {recipients.length === 0 ? (
+                                    {subscribers.length === 0 ? (
                   <div className="text-center py-8">
                     <Users className="h-12 w-12 mx-auto mb-4 text-gray-300" />
                     <p className="text-gray-600">
@@ -282,59 +287,46 @@ export default function Recipients() {
                         </tr>
                       </thead>
                       <tbody>
-                        {recipients.map((recipient: any) => (
-                          <tr key={recipient.id} className="border-b hover:bg-gray-50">
+                        {subscribers.map((subscriber: any) => (
+                          <tr key={subscriber.id} className="border-b hover:bg-gray-50">
                             <td className="py-3 px-4 text-sm text-gray-900">
-                              {recipient.email}
+                              {subscriber.email}
                             </td>
                             <td className="py-3 px-4 text-sm text-gray-600">
-                              {[recipient.first_name, recipient.last_name].filter(Boolean).join(' ') || '-'}
+                              {[subscriber.first_name, subscriber.last_name].filter(Boolean).join(' ') || '-'}
                             </td>
                             <td className="py-3 px-4 text-sm">
-                              {recipient.tags && recipient.tags.length > 0 ? (
-                                <div className="flex flex-wrap gap-1">
-                                  {recipient.tags.map((tag: string, index: number) => (
-                                    <span
-                                      key={index}
-                                      className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded-full"
-                                    >
-                                      {tag}
-                                    </span>
-                                  ))}
-                                </div>
-                              ) : (
-                                <span className="text-gray-400">-</span>
-                              )}
+                              <span className="text-gray-400">-</span>
                             </td>
                             <td className="py-3 px-4 text-sm">
                               <span
                                 className={`px-2 py-1 text-xs rounded-full ${
-                                  recipient.subscribed
+                                  subscriber.status === 'subscribed'
                                     ? 'bg-green-100 text-green-800'
                                     : 'bg-red-100 text-red-800'
                                 }`}
                               >
-                                {recipient.subscribed ? 'Subscribed' : 'Unsubscribed'}
+                                {subscriber.status === 'subscribed' ? 'Subscribed' : 'Unsubscribed'}
                               </span>
                             </td>
                             <td className="py-3 px-4 text-sm">
                               <div className="flex space-x-2">
                                 <Form method="post" className="inline">
                                   <input type="hidden" name="_action" value="toggle-subscription" />
-                                  <input type="hidden" name="recipientId" value={recipient.id} />
-                                  <input type="hidden" name="subscribed" value={recipient.subscribed} />
+                                  <input type="hidden" name="subscriberId" value={subscriber.id} />
+                                  <input type="hidden" name="status" value={subscriber.status} />
                                   <Button
                                     type="submit"
                                     variant="outline"
                                     size="sm"
                                   >
-                                    {recipient.subscribed ? 'Unsubscribe' : 'Subscribe'}
+                                    {subscriber.status === 'subscribed' ? 'Unsubscribe' : 'Subscribe'}
                                   </Button>
                                 </Form>
                                 
                                 <Form method="post" className="inline">
                                   <input type="hidden" name="_action" value="delete" />
-                                  <input type="hidden" name="recipientId" value={recipient.id} />
+                                  <input type="hidden" name="subscriberId" value={subscriber.id} />
                                   <Button
                                     type="submit"
                                     variant="outline"
