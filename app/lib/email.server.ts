@@ -48,6 +48,33 @@ function validateEmailConfig(config: any): config is EmailConfig {
   );
 }
 
+// Get email configuration from environment variables
+function getEmailConfigFromEnv(): EmailConfig | null {
+  try {
+    const host = process.env.SMTP_HOST;
+    const port = process.env.SMTP_PORT;
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+
+    if (!host || !port || !user || !pass) {
+      console.warn('Missing SMTP environment variables');
+      return null;
+    }
+
+    return {
+      host,
+      port: parseInt(port),
+      auth: {
+        user,
+        pass,
+      },
+    };
+  } catch (error) {
+    console.error('Error reading email config from environment:', error);
+    return null;
+  }
+}
+
 // Alternative HTTP-based email sending for Postmark
 async function sendEmailViaPostmarkAPI(
   apiToken: string,
@@ -105,7 +132,6 @@ async function testPostmarkAPI(apiToken: string): Promise<{ success: boolean; er
     });
 
     if (response.ok) {
-      const result = await response.json();
       return { 
         success: true,
       };
@@ -129,7 +155,7 @@ export function createTransporter(config: EmailConfig): Transporter {
     throw new Error('Invalid email configuration: missing required fields (host, port, auth.user, auth.pass)');
   }
 
-  // Optimized configuration for WebContainer environment
+  // Vercel-optimized configuration
   const transporterConfig = {
     host: config.host,
     port: config.port,
@@ -138,20 +164,22 @@ export function createTransporter(config: EmailConfig): Transporter {
       user: config.auth.user,
       pass: config.auth.pass,
     },
-    // Reduced timeouts for WebContainer
-    connectionTimeout: 5000, // 5 seconds
-    greetingTimeout: 3000, // 3 seconds
-    socketTimeout: 5000, // 5 seconds
-    // Disable pooling to avoid connection issues
+    // Shorter timeouts for serverless environment
+    connectionTimeout: 10000, // 10 seconds
+    greetingTimeout: 5000, // 5 seconds
+    socketTimeout: 10000, // 10 seconds
+    // Disable pooling for serverless
     pool: false,
-    // More lenient TLS settings
+    // TLS settings for better compatibility
     tls: {
       rejectUnauthorized: false,
-      ciphers: 'SSLv3',
     },
-    // Disable some features that might cause issues
+    // Disable features that might cause issues in serverless
     disableFileAccess: true,
     disableUrlAccess: true,
+    // Only log errors in production
+    debug: false,
+    logger: false,
   };
 
   return nodemailer.createTransport(transporterConfig);
@@ -164,12 +192,14 @@ export async function sendEmail(
 ): Promise<{ success: boolean; messageId?: string; error?: string }> {
   // Check if this is Postmark and try API first
   if (config.host === 'smtp.postmarkapp.com') {
-    console.log('Attempting to send via Postmark API...');
     const apiResult = await sendEmailViaPostmarkAPI(config.auth.user, message, fromEmail);
     if (apiResult.success) {
       return apiResult;
     }
-    console.log('Postmark API failed, falling back to SMTP:', apiResult.error);
+    // Don't log API failures in production
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Postmark API failed, falling back to SMTP:', apiResult.error);
+    }
   }
 
   // Fallback to SMTP
@@ -186,9 +216,6 @@ export async function sendEmail(
 
     transporter = createTransporter(config);
     
-    // Skip verification for faster sending
-    console.log('Sending email via SMTP...');
-    
     const result = await transporter.sendMail({
       from: fromEmail,
       to: message.to,
@@ -197,14 +224,19 @@ export async function sendEmail(
       text: message.text || message.html.replace(/<[^>]*>/g, ''),
     });
 
-    console.log('Email sent successfully via SMTP:', result.messageId);
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Email sent successfully via SMTP:', result.messageId);
+    }
     
     return {
       success: true,
       messageId: result.messageId,
     };
   } catch (error) {
-    console.error('Failed to send email via SMTP:', error);
+    // Only log errors in development
+    if (process.env.NODE_ENV === 'development') {
+      console.error('Failed to send email via SMTP:', error);
+    }
     
     return {
       success: false,
@@ -212,7 +244,14 @@ export async function sendEmail(
     };
   } finally {
     if (transporter) {
-      transporter.close();
+      try {
+        transporter.close();
+      } catch (closeError) {
+        // Ignore close errors in production
+        if (process.env.NODE_ENV === 'development') {
+          console.warn('Error closing transporter:', closeError);
+        }
+      }
     }
   }
 }
@@ -220,7 +259,6 @@ export async function sendEmail(
 export async function testSMTPConnection(config: EmailConfig): Promise<{ success: boolean; error?: string }> {
   // For Postmark, test API connection instead of SMTP
   if (config.host === 'smtp.postmarkapp.com') {
-    console.log('Testing Postmark API connection...');
     return await testPostmarkAPI(config.auth.user);
   }
 
@@ -237,22 +275,20 @@ export async function testSMTPConnection(config: EmailConfig): Promise<{ success
 
     transporter = createTransporter(config);
     
-    // Test with shorter timeout
+    // Test with timeout appropriate for serverless
     const verifyPromise = transporter.verify();
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('Connection timeout after 8 seconds')), 8000);
+      setTimeout(() => reject(new Error('Connection timeout after 15 seconds')), 15000);
     });
 
     await Promise.race([verifyPromise, timeoutPromise]);
     
     return { success: true };
   } catch (error) {
-    console.error('SMTP connection test failed:', error);
-    
     let errorMessage = 'Connection failed';
     if (error instanceof Error) {
       if (error.message.includes('ETIMEDOUT') || error.message.includes('Greeting never received')) {
-        errorMessage = 'Connection timeout - this may be due to network restrictions in the current environment';
+        errorMessage = 'Connection timeout - this may be due to network restrictions';
       } else {
         errorMessage = error.message;
       }
@@ -264,7 +300,11 @@ export async function testSMTPConnection(config: EmailConfig): Promise<{ success
     };
   } finally {
     if (transporter) {
-      transporter.close();
+      try {
+        transporter.close();
+      } catch (closeError) {
+        // Ignore close errors
+      }
     }
   }
 }
@@ -301,91 +341,138 @@ export async function sendTestEmail(
   return await sendEmail(config, testMessage, fromEmail);
 }
 
-// Campaign processing function
+// Campaign processing function with better error handling for serverless
 export async function processCampaign(
   campaignId: string,
   campaign: Campaign,
-  config: EmailConfig
+  config?: EmailConfig
 ): Promise<CampaignResult> {
-  console.log(`Starting campaign processing for: ${campaign.name} (${campaignId})`);
-  
-  let sentCount = 0;
-  let failedCount = 0;
-  const errors: string[] = [];
-
-  // Validate campaign data
-  if (!campaign.recipients || campaign.recipients.length === 0) {
-    return {
-      success: false,
-      sentCount: 0,
-      failedCount: 0,
-      errors: ['No recipients found for campaign'],
-    };
-  }
-
-  if (!campaign.subject || !campaign.content) {
-    return {
-      success: false,
-      sentCount: 0,
-      failedCount: 0,
-      errors: ['Campaign subject or content is missing'],
-    };
-  }
-
-  // Process each recipient
-  for (const recipient of campaign.recipients) {
-    try {
-      // Validate email address
-      if (!recipient || !recipient.includes('@')) {
-        failedCount++;
-        errors.push(`Invalid email address: ${recipient}`);
-        continue;
-      }
-
-      // Create email message
-      const message: EmailMessage = {
-        to: recipient,
-        subject: campaign.subject,
-        html: campaign.content,
-        text: campaign.content.replace(/<[^>]*>/g, ''), // Strip HTML for text version
+  try {
+    // Use provided config or get from environment
+    const emailConfig = config || getEmailConfigFromEnv();
+    
+    if (!emailConfig) {
+      return {
+        success: false,
+        sentCount: 0,
+        failedCount: 0,
+        errors: ['Email configuration not available'],
       };
-
-      // Send email
-      const result = await sendEmail(config, message, campaign.fromEmail);
-      
-      if (result.success) {
-        sentCount++;
-        console.log(`Email sent successfully to ${recipient}: ${result.messageId}`);
-      } else {
-        failedCount++;
-        errors.push(`Failed to send to ${recipient}: ${result.error}`);
-        console.error(`Failed to send to ${recipient}:`, result.error);
-      }
-
-      // Add small delay between emails to avoid rate limiting
-      await new Promise(resolve => setTimeout(resolve, 100));
-      
-    } catch (error) {
-      failedCount++;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      errors.push(`Error sending to ${recipient}: ${errorMessage}`);
-      console.error(`Error sending to ${recipient}:`, error);
     }
-  }
 
-  const success = sentCount > 0 && failedCount === 0;
-  
-  console.log(`Campaign processing completed: ${sentCount} sent, ${failedCount} failed`);
-  
-  return {
-    success,
-    sentCount,
-    failedCount,
-    errors,
-  };
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`Starting campaign processing for: ${campaign.name} (${campaignId})`);
+    }
+    
+    let sentCount = 0;
+    let failedCount = 0;
+    const errors: string[] = [];
+
+    // Validate campaign data
+    if (!campaign.recipients || campaign.recipients.length === 0) {
+      return {
+        success: false,
+        sentCount: 0,
+        failedCount: 0,
+        errors: ['No recipients found for campaign'],
+      };
+    }
+
+    if (!campaign.subject || !campaign.content) {
+      return {
+        success: false,
+        sentCount: 0,
+        failedCount: 0,
+        errors: ['Campaign subject or content is missing'],
+      };
+    }
+
+    // Process recipients in smaller batches for serverless
+    const batchSize = 10;
+    const batches = [];
+    
+    for (let i = 0; i < campaign.recipients.length; i += batchSize) {
+      batches.push(campaign.recipients.slice(i, i + batchSize));
+    }
+
+    // Process each batch
+    for (const batch of batches) {
+      const batchPromises = batch.map(async (recipient) => {
+        try {
+          // Validate email address
+          if (!recipient || !recipient.includes('@')) {
+            return { success: false, error: `Invalid email address: ${recipient}` };
+          }
+
+          // Create email message
+          const message: EmailMessage = {
+            to: recipient,
+            subject: campaign.subject,
+            html: campaign.content,
+            text: campaign.content.replace(/<[^>]*>/g, ''),
+          };
+
+          // Send email
+          const result = await sendEmail(emailConfig, message, campaign.fromEmail);
+          
+          if (result.success) {
+            return { success: true, recipient };
+          } else {
+            return { success: false, error: `Failed to send to ${recipient}: ${result.error}` };
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: `Error sending to ${recipient}: ${errorMessage}` };
+        }
+      });
+
+      // Wait for batch to complete
+      const batchResults = await Promise.allSettled(batchPromises);
+      
+      // Process batch results
+      batchResults.forEach((result) => {
+        if (result.status === 'fulfilled') {
+          if (result.value.success) {
+            sentCount++;
+          } else {
+            failedCount++;
+            errors.push(result.value.error);
+          }
+        } else {
+          failedCount++;
+          errors.push(`Batch processing error: ${result.reason}`);
+        }
+      });
+
+      // Small delay between batches
+      if (batches.length > 1) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
+
+    const success = sentCount > 0 && failedCount === 0;
+    
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`Campaign processing completed: ${sentCount} sent, ${failedCount} failed`);
+    }
+    
+    return {
+      success,
+      sentCount,
+      failedCount,
+      errors: errors.slice(0, 10), // Limit error array size
+    };
+  } catch (error) {
+    return {
+      success: false,
+      sentCount: 0,
+      failedCount: 0,
+      errors: [error instanceof Error ? error.message : 'Campaign processing failed'],
+    };
+  }
 }
 
-// Bulk email sending function
+// Bulk email sending function optimized for serverless
 export async function sendBulkEmails(
   config: EmailConfig,
   messages: Array<{ to: string; subject: string; html: string; text?: string }>,
@@ -397,29 +484,49 @@ export async function sendBulkEmails(
   const errors: string[] = [];
   const total = messages.length;
 
-  for (const message of messages) {
-    try {
-      const result = await sendEmail(config, message, fromEmail);
-      
-      if (result.success) {
-        sentCount++;
+  // Process in batches for better performance
+  const batchSize = 5;
+  const batches = [];
+  
+  for (let i = 0; i < messages.length; i += batchSize) {
+    batches.push(messages.slice(i, i + batchSize));
+  }
+
+  for (const batch of batches) {
+    const batchPromises = batch.map(async (message) => {
+      try {
+        const result = await sendEmail(config, message, fromEmail);
+        return { success: result.success, error: result.error, to: message.to };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        return { success: false, error: errorMessage, to: message.to };
+      }
+    });
+
+    const batchResults = await Promise.allSettled(batchPromises);
+    
+    batchResults.forEach((result) => {
+      if (result.status === 'fulfilled') {
+        if (result.value.success) {
+          sentCount++;
+        } else {
+          failedCount++;
+          errors.push(`Failed to send to ${result.value.to}: ${result.value.error}`);
+        }
       } else {
         failedCount++;
-        errors.push(`Failed to send to ${message.to}: ${result.error}`);
+        errors.push(`Batch error: ${result.reason}`);
       }
+    });
 
-      // Call progress callback if provided
-      if (onProgress) {
-        onProgress(sentCount, failedCount, total);
-      }
+    // Call progress callback if provided
+    if (onProgress) {
+      onProgress(sentCount, failedCount, total);
+    }
 
-      // Add small delay between emails
+    // Small delay between batches
+    if (batches.length > 1) {
       await new Promise(resolve => setTimeout(resolve, 100));
-      
-    } catch (error) {
-      failedCount++;
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      errors.push(`Error sending to ${message.to}: ${errorMessage}`);
     }
   }
 
@@ -427,6 +534,6 @@ export async function sendBulkEmails(
     success: sentCount > 0 && failedCount === 0,
     sentCount,
     failedCount,
-    errors,
+    errors: errors.slice(0, 10), // Limit error array size
   };
 }
