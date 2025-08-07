@@ -1,13 +1,15 @@
-import { LoaderFunctionArgs, json } from '@remix-run/node'
-import { useLoaderData, Link } from '@remix-run/react'
+import { LoaderFunctionArgs, json, ActionFunctionArgs } from '@remix-run/node'
+import { useLoaderData, Link, Form, useNavigation } from '@remix-run/react'
 import { requireAuth } from '~/lib/auth.server'
 import { supabase } from '~/lib/supabase.server'
+import { processCampaign } from '~/lib/email.server'
 import { Sidebar } from '~/components/layout/sidebar'
 import { Header } from '~/components/layout/header'
 import { Button } from '~/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card'
-import { ArrowLeft, Mail, Users, Calendar, BarChart3, Clock } from 'lucide-react'
+import { ArrowLeft, Mail, Users, Calendar, BarChart3, Clock, Play, Pause, RefreshCw } from 'lucide-react'
 import { formatDate } from '~/lib/utils'
+import { useEffect, useState } from 'react'
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
   const user = await requireAuth(request)
@@ -28,11 +30,55 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
     throw new Response('Campaign not found', { status: 404 })
   }
 
-  return json({ user, campaign })
+  const url = new URL(request.url)
+  const sending = url.searchParams.get('sending') === 'true'
+
+  return json({ user, campaign, sending })
+}
+
+export async function action({ request, params }: ActionFunctionArgs) {
+  const user = await requireAuth(request)
+  const campaignId = params.id!
+  const formData = await request.formData()
+  const action = formData.get('_action') as string
+
+  if (action === 'send_now') {
+    // Update campaign status and trigger sending
+    await supabase
+      .from('campaigns')
+      .update({ 
+        status: 'sending',
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', campaignId)
+      .eq('user_id', user.id)
+
+    // In a real app, this would be handled by a background job queue
+    // For demo purposes, we'll process it immediately
+    processCampaign(campaignId).catch(console.error)
+
+    return json({ success: 'Campaign sending started' })
+  }
+
+  return json({ error: 'Invalid action' }, { status: 400 })
 }
 
 export default function CampaignDetail() {
-  const { user, campaign } = useLoaderData<typeof loader>()
+  const { user, campaign, sending } = useLoaderData<typeof loader>()
+  const navigation = useNavigation()
+  const [refreshing, setRefreshing] = useState(false)
+
+  // Auto-refresh when campaign is sending
+  useEffect(() => {
+    if (campaign.status === 'sending' || sending) {
+      const interval = setInterval(() => {
+        setRefreshing(true)
+        window.location.reload()
+      }, 3000)
+
+      return () => clearInterval(interval)
+    }
+  }, [campaign.status, sending])
 
   const deliveryRate = campaign.total_recipients > 0 
     ? Math.round((campaign.sent_count / campaign.total_recipients) * 100)
@@ -44,7 +90,11 @@ export default function CampaignDetail() {
     sent: 'bg-green-100 text-green-800',
     scheduled: 'bg-yellow-100 text-yellow-800',
     failed: 'bg-red-100 text-red-800',
+    partially_sent: 'bg-orange-100 text-orange-800',
   }[campaign.status] || 'bg-gray-100 text-gray-800'
+
+  const canSendNow = ['draft', 'scheduled'].includes(campaign.status)
+  const isActive = ['sending'].includes(campaign.status)
 
   return (
     <div className="flex h-screen bg-gray-50">
@@ -68,15 +118,49 @@ export default function CampaignDetail() {
               </div>
               <div className="flex items-center space-x-3">
                 <span className={`px-3 py-1 text-sm rounded-full ${statusColor}`}>
-                  {campaign.status}
+                  {campaign.status.replace('_', ' ')}
+                  {refreshing && <RefreshCw className="inline h-3 w-3 ml-1 animate-spin" />}
                 </span>
+                {canSendNow && (
+                  <Form method="post">
+                    <Button 
+                      type="submit" 
+                      name="_action" 
+                      value="send_now"
+                      className="bg-green-600 hover:bg-green-700"
+                      disabled={navigation.state === 'submitting'}
+                    >
+                      <Play className="h-4 w-4 mr-2" />
+                      {navigation.state === 'submitting' ? 'Starting...' : 'Send Now'}
+                    </Button>
+                  </Form>
+                )}
                 {campaign.status === 'draft' && (
                   <Link to={`/campaigns/${campaign.id}/edit`}>
-                    <Button>Edit Campaign</Button>
+                    <Button variant="outline">Edit Campaign</Button>
                   </Link>
                 )}
               </div>
             </div>
+
+            {/* Real-time sending notification */}
+            {(campaign.status === 'sending' || sending) && (
+              <Card className="mb-8 border-blue-200 bg-blue-50">
+                <CardContent className="p-6">
+                  <div className="flex items-center">
+                    <div className="animate-pulse">
+                      <Mail className="h-6 w-6 text-blue-600" />
+                    </div>
+                    <div className="ml-4">
+                      <h3 className="text-lg font-medium text-blue-900">Campaign is sending...</h3>
+                      <p className="text-blue-700">
+                        {campaign.sent_count} of {campaign.total_recipients} emails sent
+                      </p>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Campaign Stats */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
@@ -130,7 +214,9 @@ export default function CampaignDetail() {
                     </div>
                     <div className="ml-4">
                       <p className="text-sm font-medium text-gray-600">Status</p>
-                      <p className="text-lg font-bold text-gray-900 capitalize">{campaign.status}</p>
+                      <p className="text-lg font-bold text-gray-900 capitalize">
+                        {campaign.status.replace('_', ' ')}
+                      </p>
                     </div>
                   </div>
                 </CardContent>
@@ -138,7 +224,7 @@ export default function CampaignDetail() {
             </div>
 
             {/* Progress Bar */}
-            {campaign.status === 'sending' && (
+            {campaign.total_recipients > 0 && (
               <Card className="mb-8">
                 <CardContent className="p-6">
                   <div className="flex items-center justify-between mb-2">
@@ -149,7 +235,11 @@ export default function CampaignDetail() {
                   </div>
                   <div className="w-full bg-gray-200 rounded-full h-3">
                     <div
-                      className="bg-blue-600 h-3 rounded-full transition-all duration-300"
+                      className={`h-3 rounded-full transition-all duration-300 ${
+                        campaign.status === 'sending' ? 'bg-blue-600' : 
+                        campaign.status === 'sent' ? 'bg-green-600' : 
+                        campaign.status === 'failed' ? 'bg-red-600' : 'bg-gray-400'
+                      }`}
                       style={{ width: `${deliveryRate}%` }}
                     />
                   </div>
@@ -190,6 +280,13 @@ export default function CampaignDetail() {
                     <label className="text-sm font-medium text-gray-600">Last Updated</label>
                     <p className="text-gray-900">{formatDate(campaign.updated_at)}</p>
                   </div>
+
+                  <div>
+                    <label className="text-sm font-medium text-gray-600">Targeting</label>
+                    <p className="text-gray-900">
+                      {campaign.target_all_subscribers ? 'All Subscribers' : 'Selected Lists'}
+                    </p>
+                  </div>
                 </CardContent>
               </Card>
 
@@ -201,7 +298,7 @@ export default function CampaignDetail() {
                   <div className="border rounded-lg p-4 bg-gray-50 max-h-96 overflow-y-auto">
                     <div 
                       className="prose prose-sm max-w-none"
-                      dangerouslySetInnerHTML={{ __html: campaign.content }}
+                      dangerouslySetInnerHTML={{ __html: campaign.html_content || 'No content available' }}
                     />
                   </div>
                 </CardContent>
